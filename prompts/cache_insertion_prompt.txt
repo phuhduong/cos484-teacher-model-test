@@ -1,0 +1,140 @@
+You are an expert at analyzing chain-of-thought reasoning traces and identifying where key intermediate conclusions are reached.
+
+Your task: Given a math problem and its chain-of-thought reasoning trace (from inside <think> tags), insert [CACHE] tokens at points where the model has reached a **complete, committed intermediate conclusion** that later reasoning depends on.
+
+## What qualifies for a [CACHE] token:
+
+- A concrete intermediate result that the model commits to and builds on (e.g., "The total number of ways is C(N, A)" or "x = 7")
+- A key insight or identification of the problem type that shapes all subsequent reasoning (e.g., "This is a multivariate hypergeometric distribution")
+- A verified result — where the model checks its work and confirms the conclusion
+
+## What does NOT qualify:
+
+- Hedging, questioning, or tentative statements ("Hmm, let me think...", "Wait, is that right?")
+- Abandoned conclusions — if the model later says "wait, that's wrong" or revises, the original wrong conclusion should NOT get a [CACHE] token
+- Mid-computation steps that aren't yet results (e.g., "Let me substitute x into the equation" before actually doing it)
+- Restatements of the problem or setup steps that don't produce new information
+- The final answer itself (it doesn't need caching since nothing follows it)
+
+## Rules:
+
+1. Insert [CACHE] inline in the text, immediately after the sentence or phrase containing the conclusion.
+2. Do NOT alter any of the original text. Only add [CACHE] tokens.
+3. Aim for roughly one [CACHE] per major reasoning step. Typical traces have 3–8 [CACHE] tokens. Do not over-insert.
+4. If the model backtracks and corrects itself, only mark the corrected/final version of that conclusion.
+
+## Example 1: Clean, linear reasoning
+
+**Problem:** Given a group of N balls consisting of C colors, where the number of balls in each color is n_1, n_2, ..., n_C (with n_1 + n_2 + ... + n_C = N), what is the probability that when A balls are randomly picked (where A ≤ N), the picked balls consist of a_1, a_2, ..., a_C balls of each color?
+
+**Original trace:**
+Okay, so I need to find the probability that when I pick A balls out of N, where there are C different colors, the number of each color I pick is exactly a1, a2, ..., aC. Hmm, let's think about how to approach this.
+
+First, probability problems often involve combinations. The general formula for probability is the number of favorable outcomes divided by the total number of possible outcomes.
+
+So, in this case, the favorable outcomes are the ways to pick exactly a1 of color 1, a2 of color 2, and so on up to aC of color C. The total possible outcomes would be all the ways to pick A balls regardless of color distribution.
+
+Let me break it down. The total number of ways to choose A balls from N is the combination of N choose A, which is C(N, A) = N! / (A! (N - A)!).
+
+Now, the favorable outcomes. For each color i, we need to choose ai balls from the ni available. Since the choices are independent across colors, the number of ways to do this for all colors would be the product of combinations for each color. So that's C(n1, a1) * C(n2, a2) * ... * C(nC, aC).
+
+But wait, is that right? Because when you pick a1 from n1, a2 from n2, etc., and the total number picked is A, which should sum up, right? As long as a1 + a2 + ... + aC = A, then this product gives the number of ways to pick exactly that many of each color.
+
+So, the probability should be [C(n1, a1) * C(n2, a2) * ... * C(nC, aC)] divided by C(N, A). That makes sense because each combination of selecting the specific numbers from each color is a favorable case, and the total cases are all possible A-sized groups.
+
+Let me check if there are any conditions. Each ai has to be ≤ ni, obviously, because you can't pick more balls of a color than are present. Also, the sum of ai's must equal A, which is given in the problem. If any ai > ni, the combination C(ni, ai) would be zero, so the probability would be zero, which is correct.
+
+Alternatively, this is a multivariate hypergeometric distribution problem. The hypergeometric distribution models the probability of k successes in a certain number of draws without replacement from a finite population. The multivariate version extends this to multiple categories, which is exactly the case here with different colors.
+
+The formula for the multivariate hypergeometric probability is indeed the product of combinations for each category divided by the combination of the total.
+
+Therefore, the probability is the product of combinations C(n_i, a_i) for each color i, divided by the combination C(N, A). So, I think that's the answer.
+
+**Annotated trace with [CACHE] tokens:**
+Okay, so I need to find the probability that when I pick A balls out of N, where there are C different colors, the number of each color I pick is exactly a1, a2, ..., aC. Hmm, let's think about how to approach this.
+
+First, probability problems often involve combinations. The general formula for probability is the number of favorable outcomes divided by the total number of possible outcomes. [CACHE]
+
+So, in this case, the favorable outcomes are the ways to pick exactly a1 of color 1, a2 of color 2, and so on up to aC of color C. The total possible outcomes would be all the ways to pick A balls regardless of color distribution.
+
+Let me break it down. The total number of ways to choose A balls from N is the combination of N choose A, which is C(N, A) = N! / (A! (N - A)!). [CACHE]
+
+Now, the favorable outcomes. For each color i, we need to choose ai balls from the ni available. Since the choices are independent across colors, the number of ways to do this for all colors would be the product of combinations for each color. So that's C(n1, a1) * C(n2, a2) * ... * C(nC, aC). [CACHE]
+
+But wait, is that right? Because when you pick a1 from n1, a2 from n2, etc., and the total number picked is A, which should sum up, right? As long as a1 + a2 + ... + aC = A, then this product gives the number of ways to pick exactly that many of each color.
+
+So, the probability should be [C(n1, a1) * C(n2, a2) * ... * C(nC, aC)] divided by C(N, A). That makes sense because each combination of selecting the specific numbers from each color is a favorable case, and the total cases are all possible A-sized groups. [CACHE]
+
+Let me check if there are any conditions. Each ai has to be ≤ ni, obviously, because you can't pick more balls of a color than are present. Also, the sum of ai's must equal A, which is given in the problem. If any ai > ni, the combination C(ni, ai) would be zero, so the probability would be zero, which is correct. [CACHE]
+
+Alternatively, this is a multivariate hypergeometric distribution problem. [CACHE] The hypergeometric distribution models the probability of k successes in a certain number of draws without replacement from a finite population. The multivariate version extends this to multiple categories, which is exactly the case here with different colors.
+
+The formula for the multivariate hypergeometric probability is indeed the product of combinations for each category divided by the combination of the total.
+
+Therefore, the probability is the product of combinations C(n_i, a_i) for each color i, divided by the combination C(N, A). So, I think that's the answer.
+
+**Why these placements:**
+- [CACHE] after identifying the approach (favorable/total) — this frames all subsequent reasoning.
+- [CACHE] after computing the denominator C(N, A) — a concrete result reused later.
+- [CACHE] after computing the numerator (product of combinations) — another concrete result.
+- [CACHE] after assembling the full probability formula — the core result, verified by sanity check.
+- [CACHE] after the boundary condition check — confirms the formula handles edge cases.
+- [CACHE] after identifying this as multivariate hypergeometric — a key conceptual anchor.
+- No [CACHE] on "But wait, is that right?" — that's hedging, not a conclusion.
+- No [CACHE] on the final "So, I think that's the answer" — nothing follows it.
+
+## Example 2: Reasoning with backtracking
+
+**Problem:** How many lines can be drawn that are equidistant from n given points in the plane?
+
+**Original trace:**
+Okay, so the problem is asking how many lines can be drawn that are equidistant from n given points in the plane. Hmm, let me try to wrap my head around this.
+
+First, I need to recall what it means for a line to be equidistant from points. I think when we say a line is equidistant from two points, it's the perpendicular bisector of the segment connecting those two points. Right? Because the perpendicular bisector is the set of all points equidistant from the two endpoints. So, if a line is equidistant from two points, it's that bisector.
+
+So, maybe for each pair of points, there's a unique line that's equidistant from them. So, for n points, the number of such lines would be the number of pairs of points, which is C(n, 2) or n(n-1)/2. But wait, is that the case?
+
+Wait, but the question is not about lines equidistant from pairs of points, but lines equidistant from all n points. Hmm, that's different.
+
+Wait, maybe I misread. Let me check again. The problem says "lines that are equidistant from n given points". So, does that mean a line such that all n points are equidistant from the line? Or maybe equidistant in the sense that each point has the same distance to the line?
+
+That might not even be possible unless all points lie on one side of the line and are arranged in a specific way.
+
+Alternatively, maybe equidistant here means that the line is equidistant from each pair of points, but I'm not sure.
+
+Wait, the wording is a bit ambiguous. Let me think.
+
+**Annotated trace with [CACHE] tokens:**
+Okay, so the problem is asking how many lines can be drawn that are equidistant from n given points in the plane. Hmm, let me try to wrap my head around this.
+
+First, I need to recall what it means for a line to be equidistant from points. I think when we say a line is equidistant from two points, it's the perpendicular bisector of the segment connecting those two points. Right? Because the perpendicular bisector is the set of all points equidistant from the two endpoints. So, if a line is equidistant from two points, it's that bisector. [CACHE]
+
+So, maybe for each pair of points, there's a unique line that's equidistant from them. So, for n points, the number of such lines would be the number of pairs of points, which is C(n, 2) or n(n-1)/2. But wait, is that the case?
+
+Wait, but the question is not about lines equidistant from pairs of points, but lines equidistant from all n points. Hmm, that's different.
+
+Wait, maybe I misread. Let me check again. The problem says "lines that are equidistant from n given points". So, does that mean a line such that all n points are equidistant from the line? Or maybe equidistant in the sense that each point has the same distance to the line?
+
+That might not even be possible unless all points lie on one side of the line and are arranged in a specific way.
+
+Alternatively, maybe equidistant here means that the line is equidistant from each pair of points, but I'm not sure.
+
+Wait, the wording is a bit ambiguous. Let me think.
+
+**Why these placements:**
+- [CACHE] after establishing that equidistant from two points = perpendicular bisector. This is a committed factual conclusion the model builds on.
+- NO [CACHE] on "the number of such lines would be C(n, 2) or n(n-1)/2" — the model immediately questions this and pivots away. This is an abandoned line of reasoning.
+- NO [CACHE] on any of the "Wait..." or "Hmm" sentences — these are hedging and re-evaluation, not conclusions.
+- The trace shown here is incomplete. In a full trace, additional [CACHE] tokens would appear once the model commits to a new interpretation and reaches conclusions from it.
+
+---
+
+Now, apply the same process to the following problem and trace. Return the COMPLETE trace with [CACHE] tokens inserted. Do not alter any original text.
+
+**Problem:**
+{problem}
+
+**Trace to annotate:**
+{trace}
+
+**Annotated trace with [CACHE] tokens:**
