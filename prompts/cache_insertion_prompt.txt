@@ -5,14 +5,15 @@ Your task: Given a math problem and its chain-of-thought reasoning trace (from i
 ## What qualifies for a [CACHE] token:
 
 - A concrete intermediate result that the model commits to and builds on (e.g., "The total number of ways is C(N, A)" or "x = 7")
+- A resolved computation whose result is referenced or reused in a later step (e.g., computing "C(N, A) = N!/(A!(N-A)!)" which is used in the final formula, or finding "x = 7" which is substituted later)
 - A key insight or identification of the problem type that shapes all subsequent reasoning (e.g., "This is a multivariate hypergeometric distribution")
-- A verified result — where the model checks its work and confirms the conclusion
 
 ## What does NOT qualify:
 
 - Hedging, questioning, or tentative statements ("Hmm, let me think...", "Wait, is that right?")
 - Abandoned conclusions — if the model later says "wait, that's wrong" or revises, the original wrong conclusion should NOT get a [CACHE] token
 - Mid-computation steps that aren't yet results (e.g., "Let me substitute x into the equation" before actually doing it)
+- Arithmetic that is immediately consumed in the same sentence or next line and never referenced again (e.g., "6*6 = 36" computed only to multiply by 6 on the next line)
 - Restatements of the problem or setup steps that don't produce new information
 - The final answer itself (it doesn't need caching since nothing follows it)
 
@@ -20,7 +21,7 @@ Your task: Given a math problem and its chain-of-thought reasoning trace (from i
 
 1. Insert [CACHE] inline in the text, immediately after the sentence or phrase containing the conclusion.
 2. Do NOT alter any of the original text. Only add [CACHE] tokens.
-3. Aim for roughly one [CACHE] per major reasoning step. Typical traces have 3–8 [CACHE] tokens. Do not over-insert.
+3. Focus on results that are referenced by later reasoning steps. Cache conclusions that would be costly to lose, not every arithmetic fact.
 4. If the model backtracks and corrects itself, only mark the corrected/final version of that conclusion.
 
 ## Example 1: Clean, linear reasoning

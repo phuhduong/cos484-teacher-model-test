@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 TINKER_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
-PROMPT_TEMPLATE_PATH = Path("prompts/cache_insertion_prompt.txt")
+DEFAULT_PROMPT_PATH = Path("prompts/cache_insertion_prompt.txt")
 THINK_CLOSED_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
@@ -69,9 +69,13 @@ async def process_sample(client, sample, prompt_template, model, temperature, ma
 
             annotated_trace = strip_think_tokens(raw_output)
             # Strip preamble the model echoes from the prompt template
-            preamble = "**Annotated trace with [CACHE] tokens:**"
-            if annotated_trace.startswith(preamble):
-                annotated_trace = annotated_trace[len(preamble):].strip()
+            for preamble in [
+                "**Annotated trace with [CACHE] tokens:**",
+                "Here is the annotated trace with [CACHE] tokens:",
+            ]:
+                if annotated_trace.startswith(preamble):
+                    annotated_trace = annotated_trace[len(preamble):].strip()
+                    break
             num_cache = annotated_trace.count("[CACHE]")
 
             input_tokens = response.usage.prompt_tokens if response.usage else 0
@@ -103,7 +107,8 @@ async def main():
     parser.add_argument("--temperature", type=float, default=0, help="Sampling temperature (default: 0)")
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max output tokens (default: 8192)")
     parser.add_argument("--input", default="data/raw/pilot_samples.jsonl", help="Input samples path")
-    parser.add_argument("--concurrency", type=int, default=5, help="Max parallel requests (default: 5)")
+    parser.add_argument("--prompt", default=str(DEFAULT_PROMPT_PATH), help="Prompt template path (default: prompts/cache_insertion_prompt.txt)")
+    parser.add_argument("--concurrency", type=int, default=10, help="Max parallel requests (default: 10)")
     parser.add_argument("--rerun", action="store_true", help="Ignore existing output and re-run all samples from scratch")
     args = parser.parse_args()
 
@@ -113,7 +118,7 @@ async def main():
         return
 
     # Load prompt template
-    prompt_template = PROMPT_TEMPLATE_PATH.read_text()
+    prompt_template = Path(args.prompt).read_text()
     logger.info(f"Loaded prompt template ({len(prompt_template)} chars)")
 
     # Load samples

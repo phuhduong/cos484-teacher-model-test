@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Data annotation pipeline for a COS484 project. Three scripts (`pull_samples.py` → `run_teacher.py` → `compare.py`) pull math CoT traces, send them to teacher models to insert `[CACHE]` tokens, and compare outputs. See README.md for setup and usage.
+Data annotation pipeline for a COS484 project. Three scripts (`pull_samples.py` → `run_teacher.py` → `analyze.py`) pull math CoT traces, send them to teacher models to insert `[CACHE]` tokens, and evaluate annotation quality. See README.md for setup and usage.
 
 ## Key Details
 
