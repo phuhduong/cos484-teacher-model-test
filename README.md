@@ -20,10 +20,11 @@ TINKER_API_KEY=your_key_here
 
 ### Step 1: Pull samples
 
-Streams the OpenMathReasoning dataset and samples 100 traces stratified by difficulty.
+Streams the OpenMathReasoning dataset and samples traces stratified by difficulty (easy/medium/hard).
 
 ```bash
-python scripts/pull_samples.py
+python scripts/pull_samples.py              # 100 samples (default)
+python scripts/pull_samples.py --count 5000  # 5,000 samples
 ```
 
 Output: `data/raw/pilot_samples.jsonl`

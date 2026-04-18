@@ -1,5 +1,6 @@
 """Pull and filter samples from nvidia/OpenMathReasoning for [CACHE] token annotation."""
 
+import argparse
 import json
 import logging
 import random
@@ -25,13 +26,17 @@ def extract_think_trace(generated_solution: str) -> str | None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Pull samples from OpenMathReasoning for annotation")
+    parser.add_argument("--count", type=int, default=100, help="Total number of samples to select (default: 100)")
+    args = parser.parse_args()
+
     logger.info("Loading nvidia/OpenMathReasoning (cot split, streaming)...")
     ds = load_dataset("nvidia/OpenMathReasoning", split="cot", streaming=True)
 
     # Collect candidates into difficulty buckets
     # easy: pass_rate > 0.6, medium: 0.3-0.6, hard: < 0.3
     buckets: dict[str, list[dict]] = {"easy": [], "medium": [], "hard": []}
-    target_per_bucket = 200  # oversample, then pick 33-34 from each
+    target_per_bucket = args.count * 2 // 3  # oversample pool per bucket
 
     seen_sources: dict[str, set[str]] = defaultdict(set)
     total_scanned = 0
@@ -100,7 +105,8 @@ def main():
 
     # Stratified sampling: ~33-34 from each bucket for 100 total
     selected = []
-    per_bucket = [34, 33, 33]  # easy, medium, hard — totals 100
+    base, remainder = divmod(args.count, 3)
+    per_bucket = [base + (1 if i < remainder else 0) for i in range(3)]
     for (bname, entries), n in zip(buckets.items(), per_bucket):
         if len(entries) < n:
             logger.warning(f"Bucket '{bname}' has only {len(entries)} samples (wanted {n})")
