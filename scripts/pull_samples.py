@@ -33,7 +33,6 @@ def main():
     logger.info("Loading nvidia/OpenMathReasoning (cot split, streaming)...")
     ds = load_dataset("nvidia/OpenMathReasoning", split="cot", streaming=True)
 
-    # Collect candidates into difficulty buckets
     # easy: pass_rate > 0.6, medium: 0.3-0.6, hard: < 0.3
     buckets: dict[str, list[dict]] = {"easy": [], "medium": [], "hard": []}
     target_per_bucket = args.count * 2 // 3  # oversample pool per bucket
@@ -48,7 +47,6 @@ def main():
             counts = {k: len(v) for k, v in buckets.items()}
             logger.info(f"Scanned {total_scanned} samples, bucket sizes: {counts}")
 
-        # Check all buckets full
         if all(len(v) >= target_per_bucket for v in buckets.values()):
             logger.info(f"All buckets full after scanning {total_scanned} samples.")
             break
@@ -73,7 +71,6 @@ def main():
         except (ValueError, TypeError):
             continue
 
-        # Determine bucket
         if pass_rate > 0.6:
             bucket = "easy"
         elif pass_rate >= 0.3:
@@ -98,12 +95,11 @@ def main():
         buckets[bucket].append(entry)
         seen_sources[bucket].add(source)
 
-    # Log what we found
     for bname, entries in buckets.items():
         sources = seen_sources[bname]
         logger.info(f"Bucket '{bname}': {len(entries)} candidates from {len(sources)} sources: {sources}")
 
-    # Stratified sampling: ~33-34 from each bucket for 100 total
+    # Stratified sample: ~count/3 from each difficulty bucket, round-robin across sources
     selected = []
     base, remainder = divmod(args.count, 3)
     per_bucket = [base + (1 if i < remainder else 0) for i in range(3)]
@@ -112,16 +108,13 @@ def main():
             logger.warning(f"Bucket '{bname}' has only {len(entries)} samples (wanted {n})")
             n = len(entries)
 
-        # Favor source diversity: group by source, round-robin
         by_source = defaultdict(list)
         for e in entries:
             by_source[e["problem_source"]].append(e)
 
-        # Shuffle within each source
         for src_list in by_source.values():
             random.shuffle(src_list)
 
-        # Round-robin pick
         picked = []
         source_iters = {s: iter(lst) for s, lst in by_source.items()}
         source_keys = list(source_iters.keys())
@@ -142,12 +135,10 @@ def main():
 
         selected.extend(picked)
 
-    # Assign sequential IDs and shuffle
     random.shuffle(selected)
     for i, entry in enumerate(selected):
         entry["id"] = i
 
-    # Save
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
         for entry in selected:
@@ -155,7 +146,6 @@ def main():
 
     logger.info(f"Saved {len(selected)} samples to {OUTPUT_PATH}")
 
-    # Print summary stats
     wcs = [e["word_count"] for e in selected]
     prs = [e["pass_rate_72b_tir"] for e in selected]
     sources = set(e["problem_source"] for e in selected)

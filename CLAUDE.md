@@ -10,6 +10,7 @@ Data annotation pipeline for a COS484 project. Three scripts (`pull_samples.py` 
 
 - Tinker API uses OpenAI SDK with `base_url` override — model names passed as-is (e.g., `Qwen/Qwen3-235B-A22B-Instruct-2507`)
 - Avoid Qwen3.5-* models — they are thinking models that generate large `<think>` blocks, making them very slow for annotation tasks
-- The prompt template uses `{problem}` and `{trace}` placeholders (Python `.replace()`, not `.format()`)
+- The selection prompt template uses `{problem}` and `{units}` placeholders (Python `.replace()`, not `.format()`)
 - All data files are JSONL format; samples are linked across scripts by `id` field
-- `run_teacher.py` rejects unclosed `<think>` blocks and strips preamble text echoed from the prompt template
+- `run_teacher.py` segments traces, gets JSON cache-unit-IDs from the teacher, and reconstructs the annotated trace in code — preservation is an invariant, not a scored metric
+- The final segmented unit is filtered out before reconstruction, so `[CACHE]` never lands after the final answer

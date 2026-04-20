@@ -40,15 +40,10 @@ def normalize_whitespace(text: str) -> str:
 
 
 def score_text_preservation(original: str, annotated: str) -> float:
-    clean = normalize_whitespace(annotated.replace("[CACHE]", ""))
+    """Sentinel: must be 1.0 under the selection pipeline. <1.0 signals a reconstructor bug."""
+    clean = normalize_whitespace(annotated.replace(" [CACHE]", ""))
     orig = normalize_whitespace(original)
-    if clean == orig:
-        return 1.0
-    # Ratio-based: how much of the original length is preserved
-    if len(orig) == 0:
-        return 0.0
-    diff = abs(len(orig) - len(clean))
-    return max(0.0, 1.0 - diff / len(orig))
+    return 1.0 if clean == orig else 0.0
 
 
 def score_count_appropriateness(cache_count: int, word_count: int) -> float:
@@ -57,8 +52,7 @@ def score_count_appropriateness(cache_count: int, word_count: int) -> float:
     if low <= cache_count <= high:
         return 1.0
     if cache_count < low:
-        return cache_count / low if low > 0 else 0.0
-    # cache_count > high
+        return cache_count / low
     return max(0.0, 1.0 - (cache_count - high) / high)
 
 
@@ -70,7 +64,6 @@ def score_density(cache_count: int, word_count: int) -> float:
         return 1.0
     if density < 0.5:
         return density / 0.5
-    # density > 2.0
     return max(0.0, 1.0 - (density - 2.0) / 2.0)
 
 
@@ -123,7 +116,6 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load all annotations
     all_annotations = {}
     for model in args.models:
         model_dir = ANNOTATED_DIR / model
@@ -133,14 +125,11 @@ def main():
         all_annotations[model] = load_annotations(model_dir)
         logger.info(f"Loaded {len(all_annotations[model])} samples from {model}")
 
-    # Find common sample IDs
     common_ids = sorted(set.intersection(*[set(a.keys()) for a in all_annotations.values()]))
     logger.info(f"Analyzing {len(common_ids)} common samples across {len(all_annotations)} models")
 
-    # Compute per-sample scores
     rows = []
     for sid in common_ids:
-        # Get all models' cache positions for consensus scoring
         all_positions = {m: find_cache_positions(all_annotations[m][sid]["annotated_trace"]) for m in all_annotations}
 
         for model in all_annotations:
@@ -152,27 +141,37 @@ def main():
 
             other_positions = [all_positions[m] for m in all_annotations if m != model]
 
+            preservation = score_text_preservation(original, annotated)
+            if preservation < 1.0:
+                logger.warning(f"{model} sample {sid}: text_preservation={preservation:.3f} — reconstructor may be broken")
+
+            num_units = s.get("num_units", 0)
+            selected = s.get("selected_unit_ids", [])
+            final_unit_selected = num_units > 0 and (num_units - 1) in selected
+            density = len(selected) / num_units if num_units else 0.0
+
             rows.append({
                 "id": sid,
                 "model": model,
-                "text_preservation": score_text_preservation(original, annotated),
+                "text_preservation": preservation,
                 "count_appropriateness": score_count_appropriateness(cache_count, wc),
                 "density_score": score_density(cache_count, wc),
                 "sentence_boundary": score_sentence_boundary(annotated),
                 "hedging_penalty": score_hedging_proximity(annotated),
                 "consensus": score_consensus(all_positions[model], other_positions),
+                "invalid_id": 1.0 if s.get("had_invalid_ids") else 0.0,
+                "selected_final_unit": 1.0 if final_unit_selected else 0.0,
+                "selection_density": density,
                 "cache_count": cache_count,
                 "word_count": wc,
+                "num_units": num_units,
             })
 
     df = pd.DataFrame(rows)
-
-    # Save per-sample scores
     df.to_csv(output_dir / "per_sample_scores.csv", index=False)
     logger.info(f"Saved per-sample scores to {output_dir}/per_sample_scores.csv")
 
-    # Model summary
-    metrics = ["text_preservation", "count_appropriateness", "density_score", "sentence_boundary", "hedging_penalty", "consensus"]
+    metrics = ["count_appropriateness", "density_score", "sentence_boundary", "hedging_penalty", "consensus", "invalid_id", "selected_final_unit", "selection_density"]
     summary_rows = []
     for model in all_annotations:
         mdf = df[df["model"] == model]
@@ -188,7 +187,6 @@ def main():
     summary_df.to_csv(output_dir / "model_summary.csv", index=False)
     logger.info(f"Saved model summary to {output_dir}/model_summary.csv")
 
-    # Pairwise agreement matrix
     models = list(all_annotations.keys())
     agreement_data = []
     for m1 in models:
@@ -215,33 +213,32 @@ def main():
     agreement_df.to_csv(output_dir / "pairwise_agreement.csv", index=False)
     logger.info(f"Saved pairwise agreement to {output_dir}/pairwise_agreement.csv")
 
-    # Terminal summary
     print(f"\n{'='*90}")
     print("Model Annotation Analysis")
     print(f"{'='*90}")
     print(f"Samples: {len(common_ids)}  |  Models: {len(all_annotations)}")
     print()
 
-    # Main metrics table
-    col = 14
-    header = f"{'Model':<16}" + "".join(f"{m[:col]:>{col}}" for m in ["text_pres", "count", "density", "sent_bnd", "hedging", "consensus", "avg_cache"])
+    col = 13
+    header = f"{'Model':<16}" + "".join(f"{m[:col]:>{col}}" for m in ["count", "density", "sent_bnd", "hedging", "consensus", "invalid_id", "final_unit", "sel_density", "avg_cache"])
     print(header)
     print("-" * len(header))
 
     for _, row in summary_df.iterrows():
         line = f"{row['model']:<16}"
-        line += f"{row['text_preservation_mean']:>{col}.3f}"
         line += f"{row['count_appropriateness_mean']:>{col}.3f}"
         line += f"{row['density_score_mean']:>{col}.3f}"
         line += f"{row['sentence_boundary_mean']:>{col}.3f}"
         line += f"{row['hedging_penalty_mean']:>{col}.3f}"
         line += f"{row['consensus_mean']:>{col}.3f}"
+        line += f"{row['invalid_id_mean']:>{col}.3f}"
+        line += f"{row['selected_final_unit_mean']:>{col}.3f}"
+        line += f"{row['selection_density_mean']:>{col}.3f}"
         line += f"{row['avg_cache_tokens']:>{col}}"
         print(line)
 
     print()
 
-    # Pairwise agreement
     print("Pairwise Positional Agreement:")
     col2 = 16
     print(f"{'':>{col2}}" + "".join(f"{m[:col2]:>{col2}}" for m in models))

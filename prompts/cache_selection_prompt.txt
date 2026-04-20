@@ -1,0 +1,112 @@
+You are annotating a math chain-of-thought trace for cache insertion.
+
+Task:
+Given a math problem and its chain-of-thought trace, already segmented into numbered units, return the unit IDs after which a [CACHE] token should be inserted.
+
+Definition:
+A [CACHE] token marks a point where the model has reached a complete, committed intermediate conclusion that later reasoning depends on.
+
+Core principle:
+Be precise.
+Select all clear, reusable intermediate conclusions.
+Do not select speculative, tentative, or low-value points.
+
+A unit qualifies only if BOTH are true:
+1. It contains a complete, committed intermediate conclusion.
+2. Later reasoning explicitly uses, builds on, substitutes, refers to, or depends on that conclusion.
+
+What usually qualifies:
+- A concrete intermediate result later reused.
+  - Example: x = 7
+  - Example: C(N, A) = N! / (A!(N - A)!)
+- A resolved computation whose result is used later.
+- A key conceptual identification that shapes the rest of the reasoning.
+  - Example: "This is a multivariate hypergeometric distribution."
+- A corrected final version of a conclusion after backtracking, if later reasoning depends on it.
+
+What does NOT qualify:
+- Hedging, uncertainty, questioning, or tentative language.
+  - Examples: "hmm", "maybe", "perhaps", "I think", "right?", "could it be", "is that correct?"
+- Strategy proposals or exploratory next steps.
+  - Examples: "Maybe rewrite both sides using logs.", "Let's try substitution.", "We could factor this."
+- Candidate hypotheses that are only being tested.
+  - Example: "Maybe f(a,b) = ab."
+- Abandoned conclusions or claims later rejected.
+- Mid-computation steps that are not yet stable results.
+  - Example: "Now substitute x into the equation."
+- Arithmetic or algebra immediately consumed and never reused later.
+- Restatements of the problem or setup with no new committed result.
+- The final answer or the final unit.
+  Never select the last numbered unit.
+  Even if the final unit contains an important conclusion, do not cache it, because nothing follows it.
+
+Hard rules:
+- Never select the final unit (the last numbered unit) under any circumstance.
+  If the last unit is the only unit that seems cache-worthy, do not select it.
+- Do not add a weaker earlier unit just to make up for excluding the final unit.
+- Do not select a unit just because it contains a mathematically plausible statement.
+  Select it only if the trace presents it as a committed conclusion, not as a guess, question, proposal, or test.
+- If a conclusion develops across multiple units, select only the last unit needed to make that conclusion complete.
+- Do not select redundant adjacent units unless they contain distinct later-used conclusions.
+
+Selection guidance:
+- Do not under-cache.
+- Many long traces contain several clear reusable intermediate conclusions.
+- Select all units that clearly satisfy the criteria, not just the single most obvious one.
+- When choosing between nearby units, prefer the later unit that states the conclusion most completely.
+
+Output format:
+- Return exactly one JSON object with exactly one key: "cache_unit_ids"
+- The value must be a list of integer unit IDs in ascending order
+- No prose
+- No markdown
+- No code fences
+- No extra keys
+- No duplicate IDs
+- Use [] if no units qualify
+
+Typical density:
+- Many traces will have roughly one cache per 80–120 words, but this varies widely.
+- This is a weak guideline, not a quota.
+- Do not add speculative or low-value cache points just to increase the count.
+- But do not omit clear reusable conclusions just to keep the count low.
+
+Short examples:
+
+Do NOT select:
+[12] Maybe taking logarithms will help.
+Reason: strategy proposal, not a committed conclusion.
+
+Do NOT select:
+[8] 61 is prime, right?
+Reason: question / hedging, not a committed conclusion.
+
+Do NOT select:
+[5] Maybe f(a,b) = ab.
+Reason: candidate hypothesis under consideration, not yet established.
+
+Do NOT select:
+[14] Wait, that's wrong.
+Reason: rejected conclusion / backtracking.
+
+Do NOT select:
+[24] Therefore, the probability is ... So, I think that's the answer.
+Reason: this is the final unit / final answer. Nothing follows it, so it cannot be a cache point.
+
+Do select:
+[7] The total number of ways to choose A balls from N is C(N, A) = N! / (A!(N - A)!).
+Reason: concrete intermediate result reused later.
+
+Do select:
+[15] So the probability is [C(n1,a1) * ... * C(nC,aC)] / C(N, A).
+Reason: complete assembled result used in later checking / interpretation.
+
+Now apply the same process to the following problem and segmented trace. Return JSON only.
+
+Problem:
+{problem}
+
+Numbered units:
+{units}
+
+Answer:

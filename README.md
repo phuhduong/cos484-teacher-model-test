@@ -31,7 +31,7 @@ Output: `data/raw/pilot_samples.jsonl`
 
 ### Step 2: Run teacher models
 
-Sends each trace to a teacher model to insert `[CACHE]` tokens at reasoning-step boundaries. Runs 10 concurrent requests by default. Automatically resumes from where it left off if interrupted.
+For each trace, `run_teacher.py` segments the trace into numbered reasoning units, asks the teacher to return a JSON list of unit IDs after which `[CACHE]` should be inserted, then reconstructs the annotated trace deterministically in code. The teacher never re-emits the trace, so preservation is exact by construction. The last segmented unit is filtered out before reconstruction, so `[CACHE]` is never inserted after the final answer. Runs 10 concurrent requests by default and resumes from where it left off if interrupted.
 
 ```bash
 python scripts/run_teacher.py --model "Qwen/Qwen3-235B-A22B-Instruct-2507" --output-dir data/annotated/qwen3_235b
@@ -39,14 +39,14 @@ python scripts/run_teacher.py --model "deepseek-ai/DeepSeek-V3.1" --output-dir d
 python scripts/run_teacher.py --model "meta-llama/Llama-3.3-70B-Instruct" --output-dir data/annotated/llama_70b
 
 # Re-run the same command to resume after interruption or failures
-# Use --rerun to start fresh, --concurrency N to adjust parallelism
+# Use --rerun to start fresh, --concurrency N to adjust parallelism, --limit N for smoke runs
 ```
 
-Output: `{output-dir}/annotated_samples.jsonl` and `{output-dir}/summary.json`
+Output: `{output-dir}/annotated_samples.jsonl` and `{output-dir}/summary.json`. Each row includes `annotated_trace`, `selected_unit_ids`, and `num_units`.
 
 ### Step 3: Analyze annotations
 
-Evaluates annotation quality across models using 6 metrics: text preservation, cache count appropriateness, density, sentence boundary placement, hedging proximity, and cross-model consensus.
+Evaluates annotation quality across models. Key metrics: cache count appropriateness, density, sentence boundary placement, hedging proximity, cross-model consensus, invalid-ID rate, and selection density. Text preservation and final-unit selection are invariants (always 1.0 and 0.0 respectively) logged as sentinels — non-zero deviations indicate a pipeline bug.
 
 ```bash
 python scripts/analyze.py
