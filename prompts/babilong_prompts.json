@@ -1,0 +1,17 @@
+{
+  "qa1": {
+    "instruction": "I will give you context with the facts about positions of different persons hidden in some random text and a question. You need to answer the question based only on the information from the facts. If a person was in different locations, use the latest location to answer the question.",
+    "examples": "<example>\nCharlie went to the hallway. Judith come back to the kitchen. Charlie travelled to balcony. Where is Charlie?\nAnswer: The most recent location of Charlie is balcony.\n</example>\n\n<example>\nAlan moved to the garage. Charlie went to the beach. Alan went to the shop. Rouse travelled to balcony. Where is Alan?\nAnswer: The most recent location of Alan is shop.\n</example>",
+    "post_prompt": "Always return your answer in the following format: The most recent location of 'person' is 'location'. Do not write anything else after that."
+  },
+  "qa2": {
+    "instruction": "I give you context with the facts about locations and actions of different persons hidden in some random text and a question. You need to answer the question based only on the information from the facts.\nIf a person got an item in the first location and travelled to the second location the item is also in the second location. If a person dropped an item in the first location and moved to the second location the item remains in the first location.",
+    "examples": "<example>\nCharlie went to the kitchen. Charlie got a bottle. Charlie moved to the balcony. Where is the bottle?\nAnswer: The bottle is in the balcony.\n</example>\n<example>\nAlan moved to the garage. Alan got a screw driver. Alan moved to the kitchen. Where is the screw driver?\nAnswer: The screw driver is in the kitchen.\n</example>",
+    "post_prompt": "Always return your answer in the following format: The 'item' is in 'location'. Do not write anything else after that."
+  },
+  "qa3": {
+    "instruction": "I give you context with the facts about locations and actions of different persons hidden in some random text and a question. You need to answer the question based only on the information from the facts.\nIf a person got an item in the first location and travelled to the second location the item is also in the second location. If a person dropped an item in the first location and moved to the second location the item remains in the first location.",
+    "examples": "<example>\nJohn journeyed to the bedroom. Mary grabbed the apple. Mary went back to the bathroom. Daniel journeyed to the bedroom. Daniel moved to the garden. Mary travelled to the kitchen. Where was the apple before the kitchen?\nAnswer: Before the kitchen the apple was in the bathroom.\n</example>\n<example>\nJohn went back to the bedroom. John went back to the garden. John went back to the kitchen. Sandra took the football. Sandra travelled to the garden. Sandra journeyed to the bedroom. Where was the football before the bedroom?\nAnswer: Before the bedroom the football was in the garden.\n</example>",
+    "post_prompt": "Always return your answer in the following format: Before the $location_1$ the $item$ was in the $location_2$. Do not write anything else after that."
+  }
+}

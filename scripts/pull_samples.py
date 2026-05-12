@@ -1,11 +1,13 @@
-"""Pull and filter samples from nvidia/OpenMathReasoning for [CACHE] token annotation."""
+"""Pull samples from RMT-team/babilong for trace generation and [CACHE] annotation.
+
+Pulls a balanced grid of (qa_task, length_config) cells. Each cell takes the first
+`--per-cell` rows from the corresponding BABILong split, so pulls are deterministic.
+"""
 
 import argparse
 import json
 import logging
-import random
-import re
-from collections import defaultdict
+from itertools import product
 from pathlib import Path
 
 from datasets import load_dataset
@@ -13,147 +15,58 @@ from datasets import load_dataset
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-OUTPUT_PATH = Path("data/raw/pilot_samples.jsonl")
-THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-
-def extract_think_trace(generated_solution: str) -> str | None:
-    """Extract text between <think> and </think> tags."""
-    match = THINK_RE.search(generated_solution)
-    if match:
-        return match.group(1).strip()
-    return None
+DEFAULT_OUTPUT = Path("data/raw/babilong_samples.jsonl")
+DEFAULT_TASKS = "qa1,qa2,qa3"
+DEFAULT_LENGTHS = "0k,1k,2k"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pull samples from OpenMathReasoning for annotation")
-    parser.add_argument("--count", type=int, default=100, help="Total number of samples to select (default: 100)")
+    parser = argparse.ArgumentParser(description="Pull samples from RMT-team/babilong")
+    parser.add_argument("--per-cell", type=int, default=50,
+                        help="Samples per (qa_task, length) cell (default: 50)")
+    parser.add_argument("--tasks", default=DEFAULT_TASKS,
+                        help="Comma-separated qa splits (default: qa1,qa2,qa3)")
+    parser.add_argument("--lengths", default=DEFAULT_LENGTHS,
+                        help="Comma-separated length configs (default: 0k,1k,2k)")
+    parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="Output JSONL path")
     args = parser.parse_args()
 
-    logger.info("Loading nvidia/OpenMathReasoning (cot split, streaming)...")
-    ds = load_dataset("nvidia/OpenMathReasoning", split="cot", streaming=True)
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    lengths = [l.strip() for l in args.lengths.split(",") if l.strip()]
+    logger.info(f"Tasks: {tasks} | Lengths: {lengths} | Per cell: {args.per_cell}")
 
-    # easy: pass_rate > 0.6, medium: 0.3-0.6, hard: < 0.3
-    buckets: dict[str, list[dict]] = {"easy": [], "medium": [], "hard": []}
-    target_per_bucket = args.count * 2 // 3  # oversample pool per bucket
-
-    seen_sources: dict[str, set[str]] = defaultdict(set)
-    total_scanned = 0
-
-    for sample in ds:
-        total_scanned += 1
-
-        if total_scanned % 10000 == 0:
-            counts = {k: len(v) for k, v in buckets.items()}
-            logger.info(f"Scanned {total_scanned} samples, bucket sizes: {counts}")
-
-        if all(len(v) >= target_per_bucket for v in buckets.values()):
-            logger.info(f"All buckets full after scanning {total_scanned} samples.")
-            break
-
-        generated = sample.get("generated_solution", "")
-        if not generated or "<think>" not in generated:
-            continue
-
-        trace = extract_think_trace(generated)
-        if trace is None:
-            continue
-
-        wc = len(trace.split())
-        if wc < 200 or wc > 1500:
-            continue
-
-        pass_rate_raw = sample.get("pass_rate_72b_tir")
-        if pass_rate_raw is None:
-            continue
-        try:
-            pass_rate = float(pass_rate_raw)
-        except (ValueError, TypeError):
-            continue
-
-        if pass_rate > 0.6:
-            bucket = "easy"
-        elif pass_rate >= 0.3:
-            bucket = "medium"
-        else:
-            bucket = "hard"
-
-        if len(buckets[bucket]) >= target_per_bucket:
-            continue
-
-        source = sample.get("problem_source", "unknown")
-
-        entry = {
-            "problem": sample["problem"],
-            "think_trace": trace,
-            "expected_answer": sample.get("expected_answer", ""),
-            "problem_source": source,
-            "pass_rate_72b_tir": pass_rate,
-            "word_count": wc,
-        }
-
-        buckets[bucket].append(entry)
-        seen_sources[bucket].add(source)
-
-    for bname, entries in buckets.items():
-        sources = seen_sources[bname]
-        logger.info(f"Bucket '{bname}': {len(entries)} candidates from {len(sources)} sources: {sources}")
-
-    # Stratified sample: ~count/3 from each difficulty bucket, round-robin across sources
     selected = []
-    base, remainder = divmod(args.count, 3)
-    per_bucket = [base + (1 if i < remainder else 0) for i in range(3)]
-    for (bname, entries), n in zip(buckets.items(), per_bucket):
-        if len(entries) < n:
-            logger.warning(f"Bucket '{bname}' has only {len(entries)} samples (wanted {n})")
-            n = len(entries)
+    next_id = 0
+    for length, qa_task in product(lengths, tasks):
+        logger.info(f"Loading RMT-team/babilong name={length} split={qa_task}...")
+        ds = load_dataset("RMT-team/babilong", name=length, split=qa_task)
+        n = min(args.per_cell, len(ds))
+        if n < args.per_cell:
+            logger.warning(f"Cell ({qa_task}, {length}) has only {len(ds)} samples (wanted {args.per_cell})")
+        for row in ds.select(range(n)):
+            selected.append({
+                "id": next_id,
+                "problem": row["question"],
+                "context": row["input"],
+                "target": row["target"],
+                "qa_task": qa_task,
+                "length_config": length,
+            })
+            next_id += 1
 
-        by_source = defaultdict(list)
-        for e in entries:
-            by_source[e["problem_source"]].append(e)
-
-        for src_list in by_source.values():
-            random.shuffle(src_list)
-
-        picked = []
-        source_iters = {s: iter(lst) for s, lst in by_source.items()}
-        source_keys = list(source_iters.keys())
-        random.shuffle(source_keys)
-        idx = 0
-        while len(picked) < n and source_iters:
-            src = source_keys[idx % len(source_keys)]
-            try:
-                picked.append(next(source_iters[src]))
-            except StopIteration:
-                source_iters.pop(src)
-                source_keys.remove(src)
-                if not source_keys:
-                    break
-                idx = idx % len(source_keys)
-                continue
-            idx += 1
-
-        selected.extend(picked)
-
-    random.shuffle(selected)
-    for i, entry in enumerate(selected):
-        entry["id"] = i
-
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_PATH, "w") as f:
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
         for entry in selected:
             f.write(json.dumps(entry) + "\n")
 
-    logger.info(f"Saved {len(selected)} samples to {OUTPUT_PATH}")
-
-    wcs = [e["word_count"] for e in selected]
-    prs = [e["pass_rate_72b_tir"] for e in selected]
-    sources = set(e["problem_source"] for e in selected)
-    logger.info(f"Word count: min={min(wcs)}, max={max(wcs)}, mean={sum(wcs)/len(wcs):.0f}")
-    logger.info(f"Pass rate: min={min(prs):.3f}, max={max(prs):.3f}, mean={sum(prs)/len(prs):.3f}")
-    logger.info(f"Sources ({len(sources)}): {sources}")
+    logger.info(f"Saved {len(selected)} samples to {output_path}")
+    by_cell = {}
+    for e in selected:
+        by_cell[(e["qa_task"], e["length_config"])] = by_cell.get((e["qa_task"], e["length_config"]), 0) + 1
+    for cell, count in sorted(by_cell.items()):
+        logger.info(f"  {cell[0]} @ {cell[1]}: {count}")
 
 
 if __name__ == "__main__":
-    random.seed(42)
     main()

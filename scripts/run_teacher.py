@@ -132,11 +132,13 @@ async def main():
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument("--temperature", type=float, default=0, help="Sampling temperature (default: 0)")
     parser.add_argument("--max-tokens", type=int, default=512, help="Max output tokens (default: 512)")
-    parser.add_argument("--input", default="data/raw/pilot_samples.jsonl", help="Input samples path")
+    parser.add_argument("--input", default="data/traces/babilong_traces.jsonl", help="Input samples path")
     parser.add_argument("--prompt", default=str(DEFAULT_PROMPT_PATH), help="Prompt template path")
     parser.add_argument("--concurrency", type=int, default=10, help="Max parallel requests (default: 10)")
     parser.add_argument("--rerun", action="store_true", help="Ignore existing output and re-run from scratch")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N samples (for smoke runs)")
+    parser.add_argument("--require-correct", action=argparse.BooleanOptionalAction, default=True,
+                        help="Only annotate samples with is_correct == true (default: true)")
     args = parser.parse_args()
 
     api_key = os.environ.get("TINKER_API_KEY")
@@ -152,6 +154,11 @@ async def main():
         for line in f:
             samples.append(json.loads(line))
     logger.info(f"Loaded {len(samples)} samples from {args.input}")
+
+    if args.require_correct:
+        before = len(samples)
+        samples = [s for s in samples if s.get("is_correct") is True]
+        logger.info(f"Filtered to is_correct==True: {len(samples)}/{before} samples")
 
     if args.limit is not None:
         samples = samples[: args.limit]
