@@ -1,15 +1,16 @@
-"""Segment reasoning traces into numbered units and reconstruct annotated traces."""
+"""Segment reasoning traces into numbered units and reconstruct annotated traces.
+
+A "unit" is a (start, end) tuple of char offsets into the original trace.
+"""
 
 import re
-
-Unit = tuple[int, int]  # (start, end) char offsets into the original trace
 
 _PARA_RE = re.compile(r"\n\n+")
 _SENT_RE = re.compile(r"(?<=[A-Za-z])[.!?]\s+(?=[A-Z])")
 _BULLET_RE = re.compile(r"\n[ \t]*(?:[-*]|\d+[.)])\s")
 
 
-def segment(trace: str) -> list[Unit]:
+def segment(trace):
     """Split trace into reasoning units. Each unit is (start, end) offsets.
 
     Boundaries:
@@ -19,7 +20,7 @@ def segment(trace: str) -> list[Unit]:
       - Line-leading bullets/enumerators (-, *, 1., 1))
     """
     n = len(trace)
-    splits: list[tuple[int, int]] = []  # (unit_end, next_unit_start)
+    splits = []  # (unit_end, next_unit_start)
     for m in _PARA_RE.finditer(trace):
         splits.append((m.start(), m.end()))
     for m in _SENT_RE.finditer(trace):
@@ -28,7 +29,7 @@ def segment(trace: str) -> list[Unit]:
         splits.append((m.start(), m.start() + 1))
     splits.sort()
 
-    dedup: list[tuple[int, int]] = []
+    dedup = []
     last_next = 0
     for ue, ns in splits:
         if ue < last_next:
@@ -36,7 +37,7 @@ def segment(trace: str) -> list[Unit]:
         dedup.append((ue, ns))
         last_next = ns
 
-    units: list[Unit] = []
+    units = []
     cursor = 0
     while cursor < n and trace[cursor].isspace():
         cursor += 1
@@ -54,10 +55,10 @@ def segment(trace: str) -> list[Unit]:
     return units
 
 
-def reconstruct(trace: str, units: list[Unit], cache_ids: list[int]) -> str:
+def reconstruct(trace, units, cache_ids):
     """Insert ' [CACHE]' after each selected unit's content. Round-trip safe."""
     valid = sorted({i for i in cache_ids if 0 <= i < len(units)})
-    parts: list[str] = []
+    parts = []
     cursor = 0
     for i in valid:
         end = units[i][1]
@@ -68,6 +69,6 @@ def reconstruct(trace: str, units: list[Unit], cache_ids: list[int]) -> str:
     return "".join(parts)
 
 
-def format_units(trace: str, units: list[Unit]) -> str:
+def format_units(trace, units):
     """Render units as a numbered list for the teacher prompt."""
     return "\n".join(f"[{i}] {trace[s:e]}" for i, (s, e) in enumerate(units))

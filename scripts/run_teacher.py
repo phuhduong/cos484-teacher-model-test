@@ -11,8 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import tinker
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from tinker import types
 from tqdm.asyncio import tqdm_asyncio
 
 from segment import segment, reconstruct, format_units
@@ -22,17 +23,26 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-TINKER_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
-DEFAULT_PROMPT_PATH = Path("prompts/cache_selection_prompt.txt")
-JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+INPUT_PATH = Path("data/traces/babilong_traces.jsonl")
+PROMPT_PATH = Path("prompts/cache_selection_prompt.txt")
+TEMPERATURE = 0
+MAX_TOKENS = 512
+
+_FENCE_OPEN_RE = re.compile(r"^```(?:json)?\s*\n?")
+_FENCE_CLOSE_RE = re.compile(r"\n?```\s*$")
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def parse_cache_ids(raw: str) -> list[int] | None:
-    """Parse the teacher's JSON response. Returns list of ints or None on failure."""
+def parse_cache_ids(raw):
+    """Parse the teacher's JSON response. Returns list of ints or None on failure.
+
+    Tolerates optional ```json … ``` markdown fencing and stray prose around the JSON.
+    """
+    s = _FENCE_CLOSE_RE.sub("", _FENCE_OPEN_RE.sub("", raw.strip()))
     try:
-        obj = json.loads(raw)
+        obj = json.loads(s)
     except json.JSONDecodeError:
-        m = JSON_OBJECT_RE.search(raw)
+        m = _JSON_OBJECT_RE.search(s)
         if not m:
             return None
         try:
@@ -42,24 +52,17 @@ def parse_cache_ids(raw: str) -> list[int] | None:
     ids = obj.get("cache_unit_ids")
     if not isinstance(ids, list):
         return None
-    out: list[int] = []
-    for x in ids:
-        if isinstance(x, bool) or not isinstance(x, int):
-            continue
-        out.append(x)
-    return out
+    return [x for x in ids if isinstance(x, int) and not isinstance(x, bool)]
 
 
-async def call_with_retry(client, messages, model, temperature, max_tokens, max_retries=3):
-    """Call chat completions with exponential backoff retry."""
+async def call_with_retry(sampling_client, prompt, sampling_params, max_retries=3):
+    """Call sample_async with exponential backoff retry."""
     for attempt in range(max_retries):
         try:
-            return await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
+            return await sampling_client.sample_async(
+                prompt=prompt,
+                num_samples=1,
+                sampling_params=sampling_params,
             )
         except Exception as e:
             if attempt == max_retries - 1:
@@ -69,14 +72,14 @@ async def call_with_retry(client, messages, model, temperature, max_tokens, max_
             await asyncio.sleep(wait)
 
 
-async def process_sample(client, sample, prompt_template, model, temperature, max_tokens, semaphore):
+async def process_sample(sampling_client, tokenizer, sampling_params, sample, prompt_template, model, semaphore):
     """Segment, query teacher, validate, reconstruct."""
     async with semaphore:
         trace = sample["think_trace"]
         units = segment(trace)
         if not units:
             logger.warning(f"Sample {sample['id']}: segmenter produced zero units")
-            return {"result": None, "input_tokens": 0, "output_tokens": 0, "error": "empty segmentation"}
+            return {"result": None, "input_tokens": 0, "output_tokens": 0}
 
         user_message = prompt_template.replace("{problem}", sample["problem"])
         user_message = user_message.replace("{units}", format_units(trace, units))
@@ -87,15 +90,18 @@ async def process_sample(client, sample, prompt_template, model, temperature, ma
         ]
 
         try:
-            response = await call_with_retry(client, messages, model, temperature, max_tokens)
-            raw_output = response.choices[0].message.content or ""
-            input_tokens = response.usage.prompt_tokens if response.usage else 0
-            output_tokens = response.usage.completion_tokens if response.usage else 0
+            input_token_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+            prompt = types.ModelInput.from_ints(input_token_ids)
+            response = await call_with_retry(sampling_client, prompt, sampling_params)
+            output_token_ids = list(response.sequences[0].tokens)
+            raw_output = tokenizer.decode(output_token_ids, skip_special_tokens=True)
+            input_tokens = len(input_token_ids)
+            output_tokens = len(output_token_ids)
 
             raw_ids = parse_cache_ids(raw_output)
             if raw_ids is None:
                 logger.warning(f"Sample {sample['id']}: could not parse JSON response: {raw_output[:200]}")
-                return {"result": None, "input_tokens": input_tokens, "output_tokens": output_tokens, "error": "json parse failure"}
+                return {"result": None, "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             n_units = len(units)
             # Drop the final unit — [CACHE] after the final answer adds no training signal.
@@ -119,53 +125,46 @@ async def process_sample(client, sample, prompt_template, model, temperature, ma
                 },
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "error": None,
             }
         except Exception as e:
             logger.error(f"Failed on sample {sample['id']}: {e}")
-            return {"result": None, "input_tokens": 0, "output_tokens": 0, "error": str(e)}
+            return {"result": None, "input_tokens": 0, "output_tokens": 0}
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Run teacher model for [CACHE] unit-ID selection")
     parser.add_argument("--model", required=True, help="Model name (e.g., Qwen/Qwen3-235B-A22B-Instruct-2507)")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-    parser.add_argument("--temperature", type=float, default=0, help="Sampling temperature (default: 0)")
-    parser.add_argument("--max-tokens", type=int, default=512, help="Max output tokens (default: 512)")
-    parser.add_argument("--input", default="data/traces/babilong_traces.jsonl", help="Input samples path")
-    parser.add_argument("--prompt", default=str(DEFAULT_PROMPT_PATH), help="Prompt template path")
     parser.add_argument("--concurrency", type=int, default=10, help="Max parallel requests (default: 10)")
     parser.add_argument("--rerun", action="store_true", help="Ignore existing output and re-run from scratch")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N samples (for smoke runs)")
-    parser.add_argument("--require-correct", action=argparse.BooleanOptionalAction, default=True,
-                        help="Only annotate samples with is_correct == true (default: true)")
     args = parser.parse_args()
 
-    api_key = os.environ.get("TINKER_API_KEY")
-    if not api_key:
+    if not os.environ.get("TINKER_API_KEY"):
         logger.error("TINKER_API_KEY not set. Add it to .env or export it.")
         return
 
-    prompt_template = Path(args.prompt).read_text()
-    logger.info(f"Loaded prompt template ({len(prompt_template)} chars) from {args.prompt}")
+    prompt_template = PROMPT_PATH.read_text()
+    logger.info(f"Loaded prompt template ({len(prompt_template)} chars) from {PROMPT_PATH}")
 
     samples = []
-    with open(args.input) as f:
+    with open(INPUT_PATH) as f:
         for line in f:
             samples.append(json.loads(line))
-    logger.info(f"Loaded {len(samples)} samples from {args.input}")
+    logger.info(f"Loaded {len(samples)} samples from {INPUT_PATH}")
 
-    if args.require_correct:
-        before = len(samples)
-        samples = [s for s in samples if s.get("is_correct") is True]
-        logger.info(f"Filtered to is_correct==True: {len(samples)}/{before} samples")
+    before = len(samples)
+    samples = [s for s in samples if s.get("is_correct") is True]
+    logger.info(f"Filtered to is_correct==True: {len(samples)}/{before} samples")
 
     if args.limit is not None:
         samples = samples[: args.limit]
         logger.info(f"Limiting to first {len(samples)} samples")
 
     existing_results = {}
-    output_path = Path(args.output_dir) / "annotated_samples.jsonl"
+    output_dir = Path(args.output_dir)
+    output_path = output_dir / "annotated_samples.jsonl"
+    summary_path = output_dir / "summary.json"
     if output_path.exists() and not args.rerun:
         with open(output_path) as f:
             for line in f:
@@ -177,12 +176,16 @@ async def main():
             return
         logger.info(f"Resuming: {len(existing_results)} done, {len(samples)} remaining")
 
-    client = AsyncOpenAI(base_url=TINKER_BASE_URL, api_key=api_key)
+    service_client = tinker.ServiceClient()
+    sampling_client = await service_client.create_sampling_client_async(base_model=args.model)
+    tokenizer = sampling_client.get_tokenizer()
+    sampling_params = types.SamplingParams(max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+
     semaphore = asyncio.Semaphore(args.concurrency)
     logger.info(f"Running with concurrency={args.concurrency}")
 
     tasks = [
-        process_sample(client, s, prompt_template, args.model, args.temperature, args.max_tokens, semaphore)
+        process_sample(sampling_client, tokenizer, sampling_params, s, prompt_template, args.model, semaphore)
         for s in samples
     ]
     outputs = await tqdm_asyncio.gather(*tasks, desc=f"Annotating with {args.model}")
@@ -200,7 +203,6 @@ async def main():
         else:
             failures += 1
 
-    summary_path = Path(args.output_dir) / "summary.json"
     if summary_path.exists() and not args.rerun:
         prev_summary = json.loads(summary_path.read_text())
         total_input_tokens += prev_summary.get("total_input_tokens", 0)
@@ -212,7 +214,6 @@ async def main():
         results = list(existing_results.values())
     results.sort(key=lambda r: r["id"])
 
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         for r in results:

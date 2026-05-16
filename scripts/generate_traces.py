@@ -11,10 +11,12 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
+import tinker
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from tinker import types
 from tqdm.asyncio import tqdm_asyncio
 
 load_dotenv()
@@ -22,7 +24,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-TINKER_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+INPUT_PATH = Path("data/raw/babilong_samples.jsonl")
+OUTPUT_PATH = Path("data/traces/babilong_traces.jsonl")
+TEMPERATURE = 0.6
+MAX_TOKENS = 12000
 THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 # Official BABILong prompt pieces (ported from booydar/babilong/babilong/prompts.py).
@@ -37,7 +42,7 @@ TASK_LABELS = {
     "qa3": ["bathroom", "bedroom", "garden", "hallway", "kitchen", "office"],
 }
 
-def format_prompt(sample: dict) -> str:
+def format_prompt(sample):
     """Build the BABILong prompt verbatim (no CoT directive).
 
     Kimi-K2-Thinking and similar thinking models emit <think>...</think> natively
@@ -57,19 +62,20 @@ def format_prompt(sample: dict) -> str:
     )
 
 
-def extract_think_trace(text: str) -> str | None:
+def extract_think_trace(text):
     m = THINK_RE.search(text)
     if m:
         return m.group(1).strip()
     return None
 
 
-def extract_predicted_answer(text: str) -> str | None:
-    """Capture the model's final answer line.
+def extract_predicted_answer(text):
+    """Capture the model's final answer line. Returns None if no non-empty line follows </think>.
 
     With CoT the answer is always at the END of post-think output (the model may write
     several reasoning lines after `</think>` before stating the answer). So return the
-    LAST non-empty line, with an optional `Answer:` prefix and markdown emphasis stripped.
+    LAST non-empty line, with an optional `Answer:` prefix and surrounding markdown
+    emphasis chars (`*`, `_`, `` ` ``) stripped.
     """
     after_think = THINK_RE.sub("", text).strip()
     lines = [l.strip() for l in after_think.splitlines() if l.strip()]
@@ -81,7 +87,7 @@ def extract_predicted_answer(text: str) -> str | None:
     return last.strip("*_`")
 
 
-def _preprocess_output(output: str) -> str:
+def _preprocess_output(output):
     """Port of BABILong's preprocess_output (metrics.py)."""
     output = output.lower()
     output = output.split(".")[0]
@@ -91,7 +97,7 @@ def _preprocess_output(output: str) -> str:
     return output
 
 
-def compare_answers(target: str, output: str, question: str, task_labels: list[str]) -> bool:
+def compare_answers(target, output, question, task_labels):
     """Port of BABILong's compare_answers (metrics.py)."""
     output = _preprocess_output(output)
     target = target.lower()
@@ -111,20 +117,19 @@ def compare_answers(target: str, output: str, question: str, task_labels: list[s
     return False
 
 
-def is_answer_correct(post_think_output: str, target: str, qa_task: str, question: str) -> bool:
+def is_answer_correct(post_think_output, target, qa_task, question):
     if qa_task not in TASK_LABELS:
         raise ValueError(f"No task labels for {qa_task!r}. Add it to TASK_LABELS.")
     return compare_answers(target, post_think_output, question, TASK_LABELS[qa_task])
 
 
-async def call_with_retry(client, messages, model, temperature, max_tokens, max_retries=3):
+async def call_with_retry(sampling_client, prompt, sampling_params, max_retries=3):
     for attempt in range(max_retries):
         try:
-            return await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
+            return await sampling_client.sample_async(
+                prompt=prompt,
+                num_samples=1,
+                sampling_params=sampling_params,
             )
         except Exception as e:
             if attempt == max_retries - 1:
@@ -134,20 +139,23 @@ async def call_with_retry(client, messages, model, temperature, max_tokens, max_
             await asyncio.sleep(wait)
 
 
-async def process_sample(client, sample, model, temperature, max_tokens, semaphore):
+async def process_sample(sampling_client, tokenizer, sampling_params, sample, semaphore):
     async with semaphore:
-        user_message = format_prompt(sample)
         messages = [
             {"role": "system", "content": "You are careful at tracking facts across long passages."},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": format_prompt(sample)},
         ]
 
         try:
-            response = await call_with_retry(client, messages, model, temperature, max_tokens)
-            raw = response.choices[0].message.content or ""
-            finish_reason = response.choices[0].finish_reason
-            input_tokens = response.usage.prompt_tokens if response.usage else 0
-            output_tokens = response.usage.completion_tokens if response.usage else 0
+            input_token_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+            prompt = types.ModelInput.from_ints(input_token_ids)
+            response = await call_with_retry(sampling_client, prompt, sampling_params)
+            output_seq = response.sequences[0]
+            output_token_ids = list(output_seq.tokens)
+            raw = tokenizer.decode(output_token_ids, skip_special_tokens=True)
+            finish_reason = str(getattr(output_seq, "stop_reason", "unknown"))
+            input_tokens = len(input_token_ids)
+            output_tokens = len(output_token_ids)
 
             trace = extract_think_trace(raw)
             predicted = extract_predicted_answer(raw)
@@ -174,38 +182,31 @@ async def process_sample(client, sample, model, temperature, max_tokens, semapho
                 },
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "error": None,
             }
         except Exception as e:
             logger.error(f"Failed on sample {sample['id']}: {e}")
-            return {"result": None, "input_tokens": 0, "output_tokens": 0, "error": str(e)}
+            return {"result": None, "input_tokens": 0, "output_tokens": 0}
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Generate CoT traces on BABILong samples")
     parser.add_argument("--model", default="moonshotai/Kimi-K2-Thinking",
                         help="Generator model (default: moonshotai/Kimi-K2-Thinking)")
-    parser.add_argument("--input", default="data/raw/babilong_samples.jsonl", help="Input samples path")
-    parser.add_argument("--output", default="data/traces/babilong_traces.jsonl", help="Output traces path")
-    parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature (default: 0.6)")
-    parser.add_argument("--max-tokens", type=int, default=12000, help="Max output tokens (default: 12000)")
     parser.add_argument("--concurrency", type=int, default=10, help="Max parallel requests (default: 10)")
-    parser.add_argument("--rerun", action="store_true", help="Ignore existing output and re-run from scratch")
-    parser.add_argument("--retry-incorrect", action="store_true",
-                        help="Re-attempt previously-generated samples where is_correct is false")
+    parser.add_argument("--rerun", action="store_true",
+                        help="Ignore existing output and re-run from scratch (including is_correct==True rows)")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N samples (for smoke runs)")
     args = parser.parse_args()
 
-    api_key = os.environ.get("TINKER_API_KEY")
-    if not api_key:
+    if not os.environ.get("TINKER_API_KEY"):
         logger.error("TINKER_API_KEY not set. Add it to .env or export it.")
         return
 
     samples = []
-    with open(args.input) as f:
+    with open(INPUT_PATH) as f:
         for line in f:
             samples.append(json.loads(line))
-    logger.info(f"Loaded {len(samples)} samples from {args.input}")
+    logger.info(f"Loaded {len(samples)} samples from {INPUT_PATH}")
 
     if args.limit is not None:
         samples = samples[: args.limit]
@@ -214,54 +215,36 @@ async def main():
     in_scope = list(samples)
 
     existing_results = {}
-    output_path = Path(args.output)
-    if output_path.exists() and not args.rerun:
-        with open(output_path) as f:
+    if OUTPUT_PATH.exists() and not args.rerun:
+        with open(OUTPUT_PATH) as f:
             for line in f:
                 r = json.loads(line)
                 existing_results[r["id"]] = r
 
-        n_in_scope = len(in_scope)
-        n_correct = sum(1 for s in in_scope
-                        if existing_results.get(s["id"], {}).get("is_correct"))
-        n_incorrect = sum(1 for s in in_scope
-                          if s["id"] in existing_results and not existing_results[s["id"]].get("is_correct"))
-        n_never = n_in_scope - n_correct - n_incorrect
-
-        samples_by_id = {s["id"]: s for s in in_scope}
         never_attempted = [s for s in in_scope if s["id"] not in existing_results]
+        incorrect = [s for s in in_scope
+                     if s["id"] in existing_results and not existing_results[s["id"]].get("is_correct")]
+        n_correct = len(in_scope) - len(never_attempted) - len(incorrect)
 
-        status_line = (f"Resuming from {output_path}: {n_in_scope} input samples in scope — "
-                       f"{n_correct} correct, {n_incorrect} incorrect, {n_never} never attempted.")
+        logger.info(f"Resuming from {OUTPUT_PATH}: {len(in_scope)} input samples in scope — "
+                    f"{n_correct} correct, {len(incorrect)} incorrect, {len(never_attempted)} never attempted.")
 
-        if args.retry_incorrect:
-            incorrect_in_scope_ids = [s["id"] for s in in_scope
-                                      if s["id"] in existing_results and not existing_results[s["id"]].get("is_correct")]
-            retries = [samples_by_id[i] for i in incorrect_in_scope_ids]
-            samples = never_attempted + retries
-            if not samples:
-                logger.info(status_line + " Nothing to do — all in-scope samples already correct.")
-                return
-            logger.info(status_line)
-            logger.info(f"Queue: {len(never_attempted)} never-attempted + {len(retries)} retries "
-                        f"of incorrect = {len(samples)} samples this run.")
-        else:
-            samples = never_attempted
-            if not samples:
-                logger.info(status_line + " Nothing to do — every in-scope sample already has a row "
-                            "(pass --retry-incorrect to re-attempt incorrect ones, or --rerun to start over).")
-                return
-            logger.info(status_line)
-            logger.info(f"Queue: {len(samples)} never-attempted samples this run.")
+        samples = never_attempted + incorrect
+        if not samples:
+            logger.info("Nothing to do — all in-scope samples already correct.")
+            return
+        logger.info(f"Queue: {len(never_attempted)} never-attempted + "
+                    f"{len(incorrect)} incorrect = {len(samples)} samples this run.")
 
-    client = AsyncOpenAI(base_url=TINKER_BASE_URL, api_key=api_key)
+    service_client = tinker.ServiceClient()
+    sampling_client = await service_client.create_sampling_client_async(base_model=args.model)
+    tokenizer = sampling_client.get_tokenizer()
+    sampling_params = types.SamplingParams(max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
+
     semaphore = asyncio.Semaphore(args.concurrency)
     logger.info(f"Running with concurrency={args.concurrency} model={args.model}")
 
-    tasks = [
-        process_sample(client, s, args.model, args.temperature, args.max_tokens, semaphore)
-        for s in samples
-    ]
+    tasks = [process_sample(sampling_client, tokenizer, sampling_params, s, semaphore) for s in samples]
     outputs = await tqdm_asyncio.gather(*tasks, desc=f"Generating with {args.model}")
 
     results = []
@@ -285,43 +268,32 @@ async def main():
         results = list(existing_results.values())
     results.sort(key=lambda r: r["id"])
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_PATH, "w") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
 
     final_results = {r["id"]: r for r in results}
-    by_cell_correct = {}
-    by_cell_incorrect = {}
-    by_cell_never = {}
-    by_cell_total = {}
-    n_correct = n_incorrect = n_never = 0
-    for s in in_scope:
-        cell = (s["qa_task"], s["length_config"])
-        by_cell_total[cell] = by_cell_total.get(cell, 0) + 1
+
+    def status(s):
         r = final_results.get(s["id"])
         if r is None:
-            by_cell_never[cell] = by_cell_never.get(cell, 0) + 1
-            n_never += 1
-        elif r.get("is_correct"):
-            by_cell_correct[cell] = by_cell_correct.get(cell, 0) + 1
-            n_correct += 1
-        else:
-            by_cell_incorrect[cell] = by_cell_incorrect.get(cell, 0) + 1
-            n_incorrect += 1
+            return "never"
+        return "correct" if r.get("is_correct") else "incorrect"
+
+    by_status = Counter(status(s) for s in in_scope)
+    by_cell = Counter((s["qa_task"], s["length_config"], status(s)) for s in in_scope)
+    cells = sorted({(t, l) for t, l, _ in by_cell})
 
     logger.info(f"Done. {attempts_this_run} attempts this run wrote rows; "
                 f"{failures} hard-failed (no row written).")
-    logger.info(f"In-scope totals: {n_correct} correct / {n_incorrect} incorrect / "
-                f"{n_never} never-attempted (of {len(in_scope)})")
-    for cell in sorted(by_cell_total.keys()):
-        c = by_cell_correct.get(cell, 0)
-        i = by_cell_incorrect.get(cell, 0)
-        nv = by_cell_never.get(cell, 0)
-        t = by_cell_total[cell]
-        logger.info(f"  {cell[0]} @ {cell[1]}: {c}/{t} correct, {i} incorrect, {nv} never-attempted")
+    logger.info(f"In-scope totals: {by_status['correct']} correct / {by_status['incorrect']} incorrect / "
+                f"{by_status['never']} never-attempted (of {len(in_scope)})")
+    for task, length in cells:
+        c, i, nv = by_cell[task, length, "correct"], by_cell[task, length, "incorrect"], by_cell[task, length, "never"]
+        logger.info(f"  {task} @ {length}: {c}/{c + i + nv} correct, {i} incorrect, {nv} never-attempted")
     logger.info(f"Tokens used this run: {total_input_tokens} input, {total_output_tokens} output")
-    logger.info(f"Results saved to {output_path}")
+    logger.info(f"Results saved to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
